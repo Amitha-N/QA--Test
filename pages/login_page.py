@@ -13,7 +13,7 @@ from xpaths import login_xpaths
 
 
 class LoginPage:
-    # Set up login page once with driver, base URL, and element locators.
+ # Set up login page once with driver, base URL, and element locators.
     def __init__(
         self,
         driver: WebDriver,
@@ -137,3 +137,4 @@ class LoginPage:
             and len(d.find_elements(By.XPATH, "//input[@type='password']")) == 0
         )
 
+#login flow.
