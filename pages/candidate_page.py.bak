@@ -1,0 +1,651 @@
+"""Page object for candidate creation workflow."""
+
+import platform
+
+from faker import Faker
+from selenium.common.exceptions import ElementClickInterceptedException, NoSuchWindowException, TimeoutException
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.remote.webdriver import WebDriver
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+
+from xpaths import candidate_xpaths as xpaths
+
+
+class CandidatePage:
+    """Automates one full add-candidate submission."""
+
+    def __init__(
+        self,
+        driver: WebDriver,
+        base_url: str,
+        timeout: int = 12,
+        add_testid: str | None = None,
+        create_testid: str | None = None,
+    ):
+        self.driver = driver
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.fake = Faker()
+
+        # Data-testid only (no fallback).
+        self.add_candidate_xpath = self._required_button_testid_xpath(
+            env_name="CANDIDATE_ADD_TESTID",
+            testid=add_testid,
+        )
+        self.create_candidate_xpath = self._required_button_testid_xpath(
+            env_name="CANDIDATE_CREATE_TESTID",
+            testid=create_testid,
+        )
+
+    def _required_button_testid_xpath(self, env_name: str, testid: str | None) -> str:
+        if not testid:
+            raise ValueError(
+                f"{env_name} is required. Set it in UI_Automation/.env for data-testid-only candidate buttons."
+            )
+        return xpaths.xpath_button_by_testid(testid)
+
+    def open_add_candidate(self):
+        self.driver.get(f"{self.base_url}/candidates")
+        WebDriverWait(self.driver, self.timeout).until(EC.url_contains("/candidates"))
+        add_button = WebDriverWait(self.driver, self.timeout).until(
+            EC.element_to_be_clickable((By.XPATH, self.add_candidate_xpath))
+        )
+        add_button.click()
+        WebDriverWait(self.driver, self.timeout).until(EC.url_contains("/candidates/add"))
+
+    def create_candidate(self):
+        data = self._build_candidate_data()
+        self.open_add_candidate()
+
+        fields = (
+            (xpaths.FIRST_NAME_INPUT, data["first_name"]),
+            (xpaths.LAST_NAME_INPUT, data["last_name"]),
+            (xpaths.EMAIL_INPUT, data["email"]),
+            (xpaths.LOCATION_SEARCH_INPUT, data["location"]),
+            (xpaths.LOCATION_STREET1_INPUT, data["street_1"]),
+            (xpaths.LOCATION_STREET2_INPUT, data["street_2"]),
+            (xpaths.LOCATION_CITY_INPUT, data["city"]),
+            (xpaths.LOCATION_STATE_INPUT, data["state"]),
+            (xpaths.LOCATION_COUNTRY_INPUT, data["country"]),
+            (xpaths.LOCATION_ZIP_INPUT, data["zip_code"]),
+            (xpaths.EXPERIENCE_COMPANY_INPUT, data["company_name"]),
+            (xpaths.EXPERIENCE_TITLE_INPUT, data["job_title"]),
+            (xpaths.EXPERIENCE_FROM_DATE_INPUT, data["work_from_date"]),
+            (xpaths.EXPERIENCE_TO_DATE_INPUT, data["work_to_date"]),
+            (xpaths.EDUCATION_SCHOOL_INPUT, data["school_name"]),
+            (xpaths.EDUCATION_DEGREE_INPUT, data["degree"]),
+            (xpaths.EDUCATION_SPECIALIZATION_INPUT, data["specialization"]),
+            (xpaths.EDUCATION_FROM_DATE_INPUT, data["education_from_date"]),
+            (xpaths.EDUCATION_TO_DATE_INPUT, data["education_to_date"]),
+            (xpaths.LINKEDIN_INPUT, data["linkedin_url"]),
+        )
+        for xpath, value in fields:
+            self._fill_by_xpath(xpath, value)
+
+        self._click_create()
+        self._wait_for_submission()
+
+    def _build_candidate_data(self) -> dict[str, str]:
+        fake = self.fake
+        city = fake.city()
+        state = fake.state_abbr()
+        country = fake.country()
+        work_from_obj = fake.date_between(start_date="-10y", end_date="-2y")
+        work_to_obj = fake.date_between(start_date=work_from_obj, end_date="today")
+        education_from_obj = fake.date_between(start_date="-15y", end_date="-6y")
+        education_to_obj = fake.date_between(start_date=education_from_obj, end_date="-2y")
+
+        return {
+            "first_name": fake.first_name(),
+            "last_name": fake.last_name(),
+            "email": fake.unique.email(),
+            "location": f"{city}, {state}, {country}",
+            "street_1": fake.street_address(),
+            "street_2": f"Suite {fake.random_int(min=100, max=999)}",
+            "city": city,
+            "state": state,
+            "country": country,
+            "zip_code": fake.postcode(),
+            "company_name": fake.company(),
+            "job_title": fake.job(),
+            "work_from_date": work_from_obj.strftime("%m/%d/%Y"),
+            "work_to_date": work_to_obj.strftime("%m/%d/%Y"),
+            "school_name": fake.company() + " University",
+            "degree": fake.random_element(("B.S.", "B.Tech", "M.S.", "MBA")),
+            "specialization": fake.random_element(
+                ("Computer Science", "Information Technology", "Data Science", "Engineering")
+            ),
+            "education_from_date": education_from_obj.strftime("%m/%d/%Y"),
+            "education_to_date": education_to_obj.strftime("%m/%d/%Y"),
+            "linkedin_url": (
+                "https://www.linkedin.com/in/"
+                f"{fake.user_name()}{fake.random_int(min=100, max=999)}"
+            ),
+        }
+
+    def _fill_by_xpath(self, xpath: str, value: str):
+        element = WebDriverWait(self.driver, self.timeout).until(
+            EC.visibility_of_element_located((By.XPATH, xpath))
+        )
+        self._type_into_input(element, value)
+
+    def _click_create(self):
+        create_button = WebDriverWait(self.driver, self.timeout).until(
+            EC.element_to_be_clickable((By.XPATH, self.create_candidate_xpath))
+        )
+        create_button.click()
+
+    def _wait_for_submission(self):
+        if not self._is_window_alive():
+            raise RuntimeError("Browser window closed during candidate creation.")
+
+        wait = WebDriverWait(self.driver, max(self.timeout, 45))
+        try:
+            wait.until(
+                lambda d: self._left_add_form(d.current_url) or self._candidate_form_has_blocking_error()
+            )
+        except TimeoutException:
+            if self._candidate_form_has_blocking_error():
+                raise RuntimeError(self._candidate_form_error_message() or "Candidate form error after submit.")
+            raise TimeoutException("Timed out waiting to leave /candidates/add after Create candidate.")
+
+        if self._candidate_form_has_blocking_error():
+            raise RuntimeError(self._candidate_form_error_message() or "Candidate form error after submit.")
+
+    @staticmethod
+    def _left_add_form(current_url: str) -> bool:
+        return "/candidates/add" not in (current_url or "")
+
+    def _candidate_form_has_blocking_error(self) -> bool:
+        if self._candidate_form_error_message():
+            return True
+        for xpath in xpaths.FORM_FIELD_ERROR_XPATHS:
+            if self.driver.find_elements(By.XPATH, xpath):
+                return True
+        return False
+
+    def _candidate_form_error_message(self) -> str | None:
+        for element in self.driver.find_elements(By.XPATH, xpaths.ERROR_MESSAGE_ALERT):
+            if not element.is_displayed():
+                continue
+            text = (element.text or "").strip()
+            if len(text) >= 2:
+                return text
+        return None
+
+    def _is_window_alive(self) -> bool:
+        try:
+            return bool(self.driver.window_handles)
+        except NoSuchWindowException:
+            return False
+        except Exception:
+            return False
+
+    def _type_into_input(self, element, value: str):
+        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+        try:
+            element.click()
+        except ElementClickInterceptedException:
+            self.driver.execute_script("arguments[0].click();", element)
+
+        select_all = Keys.COMMAND if platform.system() == "Darwin" else Keys.CONTROL
+        element.send_keys(select_all, "a")
+        element.send_keys(Keys.BACKSPACE)
+        element.send_keys(value)
+"""Page object for add-candidate automation."""
+
+import platform
+import time
+
+from faker import Faker
+from selenium.common.exceptions import ElementClickInterceptedException, NoSuchWindowException, TimeoutException
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.remote.webdriver import WebDriver
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+
+from xpaths import candidate_xpaths as xpaths
+
+
+class CandidatePage:
+    def __init__(
+        self,
+        driver: WebDriver,
+        base_url: str,
+        timeout: int = 12,
+        add_testid: str | None = None,
+        create_testid: str | None = None,
+    ):
+        self.driver = driver
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.fake = Faker()
+
+        self.add_candidate_xpath = (
+            xpaths.xpath_button_by_testid(add_testid) if add_testid else xpaths.ADD_CANDIDATE_BUTTON
+        )
+        self.create_candidate_xpath = (
+            xpaths.xpath_button_by_testid(create_testid) if create_testid else xpaths.CREATE_CANDIDATE_BUTTON
+        )
+
+    def open_add_candidate(self):
+        """Open candidates page and click Add candidate."""
+        self.driver.get(f"{self.base_url}/candidates")
+        WebDriverWait(self.driver, self.timeout).until(EC.url_contains("/candidates"))
+        add_button = WebDriverWait(self.driver, self.timeout).until(
+            EC.element_to_be_clickable((By.XPATH, self.add_candidate_xpath))
+        )
+        add_button.click()
+        WebDriverWait(self.driver, self.timeout).until(EC.url_contains("/candidates/add"))
+
+    def create_candidate(self):
+        """Create one candidate with Faker-generated data."""
+        data = self._build_candidate_data()
+        self.open_add_candidate()
+
+        fields = (
+            (xpaths.FIRST_NAME_INPUT, data["first_name"]),
+            (xpaths.LAST_NAME_INPUT, data["last_name"]),
+            (xpaths.EMAIL_INPUT, data["email"]),
+            (xpaths.LOCATION_SEARCH_INPUT, data["location"]),
+            (xpaths.LOCATION_STREET1_INPUT, data["street_1"]),
+            (xpaths.LOCATION_STREET2_INPUT, data["street_2"]),
+            (xpaths.LOCATION_CITY_INPUT, data["city"]),
+            (xpaths.LOCATION_STATE_INPUT, data["state"]),
+            (xpaths.LOCATION_COUNTRY_INPUT, data["country"]),
+            (xpaths.LOCATION_ZIP_INPUT, data["zip_code"]),
+            (xpaths.EXPERIENCE_COMPANY_INPUT, data["company_name"]),
+            (xpaths.EXPERIENCE_TITLE_INPUT, data["job_title"]),
+            (xpaths.EXPERIENCE_FROM_DATE_INPUT, data["work_from_date"]),
+            (xpaths.EXPERIENCE_TO_DATE_INPUT, data["work_to_date"]),
+            (xpaths.EDUCATION_SCHOOL_INPUT, data["school_name"]),
+            (xpaths.EDUCATION_DEGREE_INPUT, data["degree"]),
+            (xpaths.EDUCATION_SPECIALIZATION_INPUT, data["specialization"]),
+            (xpaths.EDUCATION_FROM_DATE_INPUT, data["education_from_date"]),
+            (xpaths.EDUCATION_TO_DATE_INPUT, data["education_to_date"]),
+            (xpaths.LINKEDIN_INPUT, data["linkedin_url"]),
+        )
+        for xpath, value in fields:
+            self._fill_by_xpath(xpath, value)
+
+        self._click_create()
+        self._wait_for_submission()
+
+    def _build_candidate_data(self) -> dict[str, str]:
+        fake = self.fake
+
+        city = fake.city()
+        state = fake.state_abbr()
+        country = fake.country()
+        work_from_obj = fake.date_between(start_date="-10y", end_date="-2y")
+        work_to_obj = fake.date_between(start_date=work_from_obj, end_date="today")
+        education_from_obj = fake.date_between(start_date="-15y", end_date="-6y")
+        education_to_obj = fake.date_between(start_date=education_from_obj, end_date="-2y")
+
+        return {
+            "first_name": fake.first_name(),
+            "last_name": fake.last_name(),
+            "email": fake.unique.email(),
+            "location": f"{city}, {state}, {country}",
+            "street_1": fake.street_address(),
+            "street_2": f"Suite {fake.random_int(min=100, max=999)}",
+            "city": city,
+            "state": state,
+            "country": country,
+            "zip_code": fake.postcode(),
+            "company_name": fake.company(),
+            "job_title": fake.job(),
+            "work_from_date": work_from_obj.strftime("%m/%d/%Y"),
+            "work_to_date": work_to_obj.strftime("%m/%d/%Y"),
+            "school_name": fake.company() + " University",
+            "degree": fake.random_element(("B.S.", "B.Tech", "M.S.", "MBA")),
+            "specialization": fake.random_element(
+                ("Computer Science", "Information Technology", "Data Science", "Engineering")
+            ),
+            "education_from_date": education_from_obj.strftime("%m/%d/%Y"),
+            "education_to_date": education_to_obj.strftime("%m/%d/%Y"),
+            "linkedin_url": (
+                "https://www.linkedin.com/in/"
+                f"{fake.user_name()}{fake.random_int(min=100, max=999)}"
+            ),
+        }
+
+    def _fill_by_xpath(self, xpath: str, value: str):
+        element = WebDriverWait(self.driver, self.timeout).until(
+            EC.visibility_of_element_located((By.XPATH, xpath))
+        )
+        self._type_into_input(element, value)
+
+    def _click_create(self):
+        create_button = WebDriverWait(self.driver, self.timeout).until(
+            EC.element_to_be_clickable((By.XPATH, self.create_candidate_xpath))
+        )
+        create_button.click()
+
+    def _wait_for_submission(self):
+        if not self._is_window_alive():
+            raise RuntimeError("Browser window closed during candidate creation.")
+
+        wait = WebDriverWait(self.driver, max(self.timeout, 45))
+        try:
+            wait.until(
+                lambda d: self._left_add_form(d.current_url) or self._candidate_form_has_blocking_error()
+            )
+        except TimeoutException:
+            if self._candidate_form_has_blocking_error():
+                raise RuntimeError(self._candidate_form_error_message() or "Candidate form error after submit.")
+            raise TimeoutException("Timed out waiting to leave /candidates/add after Create candidate.")
+
+        if self._candidate_form_has_blocking_error():
+            raise RuntimeError(self._candidate_form_error_message() or "Candidate form error after submit.")
+
+    @staticmethod
+    def _left_add_form(current_url: str) -> bool:
+        return "/candidates/add" not in (current_url or "")
+
+    def _candidate_form_has_blocking_error(self) -> bool:
+        if self._candidate_form_error_message():
+            return True
+        for xpath in xpaths.FORM_FIELD_ERROR_XPATHS:
+            if self.driver.find_elements(By.XPATH, xpath):
+                return True
+        return False
+
+    def _candidate_form_error_message(self) -> str | None:
+        for element in self.driver.find_elements(By.XPATH, xpaths.ERROR_MESSAGE_ALERT):
+            if not element.is_displayed():
+                continue
+            text = (element.text or "").strip()
+            if len(text) >= 2:
+                return text
+        return None
+
+    def _is_window_alive(self) -> bool:
+        try:
+            return bool(self.driver.window_handles)
+        except NoSuchWindowException:
+            return False
+        except Exception:
+            return False
+
+    def _type_into_input(self, element, value: str):
+        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+        try:
+            element.click()
+        except ElementClickInterceptedException:
+            self.driver.execute_script("arguments[0].click();", element)
+
+        select_all = Keys.COMMAND if platform.system() == "Darwin" else Keys.CONTROL
+        element.send_keys(select_all, "a")
+        element.send_keys(Keys.BACKSPACE)
+        element.send_keys(value)
+"""Page object for candidate creation workflow."""
+
+import time
+import platform
+from dataclasses import dataclass
+
+from faker import Faker
+from selenium.common.exceptions import ElementClickInterceptedException, NoSuchWindowException, TimeoutException
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.remote.webdriver import WebDriver
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+
+from xpaths import candidate_xpaths
+
+
+@dataclass
+class CandidateData:
+    """Typed payload used to populate the add-candidate form."""
+
+    first_name: str
+    last_name: str
+    email: str
+    location: str
+    street_1: str
+    street_2: str
+    city: str
+    state: str
+    country: str
+    zip_code: str
+    company_name: str
+    job_title: str
+    work_from_date: str
+    work_to_date: str
+    school_name: str
+    degree: str
+    specialization: str
+    education_from_date: str
+    education_to_date: str
+    linkedin_url: str
+
+
+class CandidatePage:
+    DATE_FORMAT = "%m/%d/%Y"
+    DEGREE_CHOICES = ("B.S.", "B.Tech", "M.S.", "MBA")
+    SPECIALIZATION_CHOICES = (
+        "Computer Science",
+        "Information Technology",
+        "Data Science",
+        "Engineering",
+    )
+
+    def __init__(
+        self,
+        driver: WebDriver,
+        base_url: str,
+        timeout: int = 12,
+        add_testid: str | None = None,
+        create_testid: str | None = None,
+    ):
+        self.driver = driver
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.fake = Faker()
+
+        if add_testid:
+            self.add_candidate_xpath = candidate_xpaths.xpath_button_by_testid(add_testid)
+        else:
+            self.add_candidate_xpath = candidate_xpaths.ADD_CANDIDATE_BUTTON
+
+        if create_testid:
+            self.create_candidate_xpath = candidate_xpaths.xpath_button_by_testid(create_testid)
+        else:
+            self.create_candidate_xpath = candidate_xpaths.CREATE_CANDIDATE_BUTTON
+
+    def open_add_candidate(self):
+        """Open the add-candidate page from the candidates list."""
+        self.driver.get(f"{self.base_url}/candidates")
+        WebDriverWait(self.driver, self.timeout).until(EC.url_contains("/candidates"))
+
+        add_button = WebDriverWait(self.driver, self.timeout).until(
+            EC.element_to_be_clickable((By.XPATH, self.add_candidate_xpath))
+        )
+        add_button.click()
+
+        WebDriverWait(self.driver, self.timeout).until(EC.url_contains("/candidates/add"))
+
+    def fill_by_xpath(self, xpath: str, value: str):
+        """Wait for a field located by XPath and type a value into it."""
+        element = WebDriverWait(self.driver, self.timeout).until(
+            EC.visibility_of_element_located((By.XPATH, xpath))
+        )
+        self._type_into_input(element, value)
+
+    def create_candidate(self):
+        """Create one candidate with Faker-generated data."""
+        # Keep this high-level flow simple and readable.
+        data = self._generate_candidate_data()
+        self.open_add_candidate()
+        self._fill_candidate_form(data)
+        self._submit_candidate_form()
+        self._wait_for_submission()
+
+    def _generate_candidate_data(self) -> CandidateData:
+        """Generate one realistic candidate payload."""
+        fake = self.fake
+
+        # Core identity fields.
+        first_name = fake.first_name()
+        last_name = fake.last_name()
+        email = fake.unique.email()
+        city = fake.city()
+        state = fake.state_abbr()
+        country = fake.country()
+        location = f"{city}, {state}, {country}"
+        street_1 = fake.street_address()
+        street_2 = f"Suite {fake.random_int(min=100, max=999)}"
+        zip_code = fake.postcode()
+        company_name = fake.company()
+        job_title = fake.job()
+        work_from_obj = fake.date_between(start_date="-10y", end_date="-2y")
+        work_to_obj = fake.date_between(start_date=work_from_obj, end_date="today")
+        work_from_date = work_from_obj.strftime(self.DATE_FORMAT)
+        work_to_date = work_to_obj.strftime(self.DATE_FORMAT)
+        school_name = fake.company() + " University"
+        degree = fake.random_element(self.DEGREE_CHOICES)
+        specialization = fake.random_element(self.SPECIALIZATION_CHOICES)
+        education_from_obj = fake.date_between(start_date="-15y", end_date="-6y")
+        education_to_obj = fake.date_between(start_date=education_from_obj, end_date="-2y")
+        education_from_date = education_from_obj.strftime(self.DATE_FORMAT)
+        education_to_date = education_to_obj.strftime(self.DATE_FORMAT)
+        linkedin_url = (
+            "https://www.linkedin.com/in/"
+            f"{fake.user_name()}{fake.random_int(min=100, max=999)}"
+        )
+
+        # Return one typed payload object so form-fill logic stays clean.
+        return CandidateData(
+            first_name=first_name,
+            last_name=last_name,
+            email=email,
+            location=location,
+            street_1=street_1,
+            street_2=street_2,
+            city=city,
+            state=state,
+            country=country,
+            zip_code=zip_code,
+            company_name=company_name,
+            job_title=job_title,
+            work_from_date=work_from_date,
+            work_to_date=work_to_date,
+            school_name=school_name,
+            degree=degree,
+            specialization=specialization,
+            education_from_date=education_from_date,
+            education_to_date=education_to_date,
+            linkedin_url=linkedin_url,
+        )
+
+    def _fill_candidate_form(self, data: CandidateData):
+        """Populate all required fields in the add-candidate form."""
+        # Locator-to-value mapping. Updating fields is now a one-line change.
+        field_values: tuple[tuple[str, str], ...] = (
+            (candidate_xpaths.FIRST_NAME_INPUT, data.first_name),
+            (candidate_xpaths.LAST_NAME_INPUT, data.last_name),
+            (candidate_xpaths.EMAIL_INPUT, data.email),
+            (candidate_xpaths.LOCATION_SEARCH_INPUT, data.location),
+            (candidate_xpaths.LOCATION_STREET1_INPUT, data.street_1),
+            (candidate_xpaths.LOCATION_STREET2_INPUT, data.street_2),
+            (candidate_xpaths.LOCATION_CITY_INPUT, data.city),
+            (candidate_xpaths.LOCATION_STATE_INPUT, data.state),
+            (candidate_xpaths.LOCATION_COUNTRY_INPUT, data.country),
+            (candidate_xpaths.LOCATION_ZIP_INPUT, data.zip_code),
+            (candidate_xpaths.EXPERIENCE_COMPANY_INPUT, data.company_name),
+            (candidate_xpaths.EXPERIENCE_TITLE_INPUT, data.job_title),
+            (candidate_xpaths.EXPERIENCE_FROM_DATE_INPUT, data.work_from_date),
+            (candidate_xpaths.EXPERIENCE_TO_DATE_INPUT, data.work_to_date),
+            (candidate_xpaths.EDUCATION_SCHOOL_INPUT, data.school_name),
+            (candidate_xpaths.EDUCATION_DEGREE_INPUT, data.degree),
+            (candidate_xpaths.EDUCATION_SPECIALIZATION_INPUT, data.specialization),
+            (candidate_xpaths.EDUCATION_FROM_DATE_INPUT, data.education_from_date),
+            (candidate_xpaths.EDUCATION_TO_DATE_INPUT, data.education_to_date),
+            (candidate_xpaths.LINKEDIN_INPUT, data.linkedin_url),
+        )
+        for xpath, value in field_values:
+            self.fill_by_xpath(xpath, value)
+
+    def _submit_candidate_form(self):
+        """Click the Create candidate button."""
+        create_button = WebDriverWait(self.driver, self.timeout).until(
+            EC.element_to_be_clickable((By.XPATH, self.create_candidate_xpath))
+        )
+        create_button.click()
+
+    def _wait_for_submission(self):
+        """Wait for success transition or a blocking form error."""
+        if not self._is_window_alive():
+            raise RuntimeError("Browser window closed during candidate creation.")
+
+        wait_seconds = max(self.timeout, 45)
+        wait = WebDriverWait(self.driver, wait_seconds)
+
+        try:
+            # Success = left add form URL; failure = blocking validation/alert.
+            wait.until(lambda d: self._left_add_form(d.current_url) or self._candidate_form_has_blocking_error())
+        except TimeoutException:
+            if self._candidate_form_has_blocking_error():
+                raise RuntimeError(self._candidate_form_error_message() or "Candidate form error after submit.")
+            raise TimeoutException("Timed out waiting to leave /candidates/add after Create candidate.")
+
+        if self._candidate_form_has_blocking_error():
+            raise RuntimeError(self._candidate_form_error_message() or "Candidate form error after submit.")
+
+    @staticmethod
+    def _left_add_form(current_url: str) -> bool:
+        return "/candidates/add" not in (current_url or "")
+
+    def _candidate_form_has_blocking_error(self) -> bool:
+        """Return True when validation or an alert indicates submit failure."""
+        if self._candidate_form_error_message():
+            return True
+        for xpath in candidate_xpaths.FORM_FIELD_ERROR_XPATHS:
+            if self.driver.find_elements(By.XPATH, xpath):
+                return True
+        return False
+
+    def _candidate_form_error_message(self) -> str | None:
+        """Return first meaningful visible alert text, if present."""
+
+        def meaningful(text: str) -> bool:
+            stripped = text.strip()
+            return len(stripped) >= 2
+
+        for element in self.driver.find_elements(By.XPATH, candidate_xpaths.ERROR_MESSAGE_ALERT):
+            if not element.is_displayed():
+                continue
+            text = (element.text or "").strip()
+            if meaningful(text):
+                return text
+        return None
+
+    def _is_window_alive(self) -> bool:
+        """Check whether the browser window is still available."""
+        try:
+            return bool(self.driver.window_handles)
+        except NoSuchWindowException:
+            return False
+        except Exception:
+            return False
+
+    def _type_into_input(self, element, value: str):
+        """Focus field, clear previous content, and type the new value."""
+        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+        try:
+            element.click()
+        except ElementClickInterceptedException:
+            # Fallback click via JS when overlays intercept native click.
+            self.driver.execute_script("arguments[0].click();", element)
+
+        # Use a single OS-appropriate select-all shortcut.
+        select_all = Keys.COMMAND if platform.system() == "Darwin" else Keys.CONTROL
+        element.send_keys(select_all, "a")
+        element.send_keys(Keys.BACKSPACE)
+        element.send_keys(value)
+
